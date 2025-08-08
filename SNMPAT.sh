@@ -1,8 +1,23 @@
 #!/bin/bash
+set -euo pipefail
 
 # Script Name: SNMP Audit Tool (SNMPAT)
 # Description: This script performs an SNMP audit on a list of subnets and IP addresses using the onesixtyone SNMP scanner. It sorts the subnets and IP addresses, creates a file with SNMP community strings, and scans each subnet/IP one by one. The script then removes duplicate entries from the log file and performs a DNS lookup on each host, prepending the hostname to each line. The script also includes a cleanup section that removes all temporary files, leaving only the final log file.
 # Github: wompRS
+
+# Function to handle fatal errors
+error_exit() {
+    echo "Error: $1" >&2
+    exit 1
+}
+
+# Ensure required commands are available
+check_dependencies() {
+    command -v onesixtyone >/dev/null 2>&1 || error_exit "onesixtyone is required but not installed."
+    command -v dig >/dev/null 2>&1 || error_exit "dig is required but not installed."
+}
+
+check_dependencies
 
 # Function to print a progress bar in light green color
 print_progress() {
@@ -230,6 +245,11 @@ total_subnets=${#subnets[@]}
 total_ip_addresses=${#ip_addresses[@]}
 total=$((total_subnets + total_ip_addresses))
 
+# Ensure at least one address was provided
+if [[ $total -eq 0 ]]; then
+    error_exit "No valid subnets or IP addresses provided."
+fi
+
 # Print the starting message
 echo "" # Newline for clean output
 if [[ $total_subnets -eq 0 ]]; then
@@ -248,8 +268,13 @@ current_user=$(whoami)
 # Create a new log file with the current date in the name
 log_file="$HOME/SNMPAT_log_$now.log"
 
+# Ensure the log file can be created
+if ! touch "$log_file"; then
+    error_exit "Unable to create log file at $log_file"
+fi
+
 # Write the date, time, and user info to the top of the log file
-echo "SNMPAT started at $now by user $current_user." >$log_file
+echo "SNMPAT started at $now by user $current_user." >"$log_file"
 
 # Scan each subnet/IP one by one
 for i in "${!subnets[@]}" "${!ip_addresses[@]}"; do
@@ -274,7 +299,10 @@ done
 sed -i '/Error in sendto: Permission denied/d' $log_file # Remove the "Error in sendto: Permission denied" line from the log file
 sed -i '/Scanning/d' $log_file                           # Remove the "Scanning" line from the log file
 awk 'NR>3 {print $1}' $log_file | sort -u | tail -n +4 | uniq | while read -r ip; do
-    hostname=$(dig +short -x "$ip")
+    if ! hostname=$(dig +short -x "$ip"); then
+        echo "dig lookup failed for IP: $ip" >&2
+        continue
+    fi
     if [[ -n $hostname ]]; then
         sed -i "s|$ip|$hostname $ip|g" "$log_file"
     else
