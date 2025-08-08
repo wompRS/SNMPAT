@@ -19,11 +19,41 @@ check_dependencies() {
 
 check_dependencies
 
+# Prompt user for SNMP community strings and store them in a temporary file
+get_community_strings() {
+    local default_strings=("public" "community" "default" "admin" "private" "manager" "cisco" "snmp" "network" "monitor" "agent" "trap" "read" "write")
+    echo -e "\e[93mSelect SNMP community string input:\e[0m"
+    echo "1. Use default list"
+    echo "2. Enter strings manually (comma-separated)"
+    echo "3. Provide path to a file"
+    read -rp $'\e[93;1mChoice [1-3]: \e[0m' choice
+    case "$choice" in
+        2)
+            read -rp $'\e[93;1mEnter community strings: \e[0m' cs_input
+            IFS=',' read -ra community_strings <<<"$cs_input"
+            ;;
+        3)
+            read -rp $'\e[93;1mEnter file path: \e[0m' cs_file
+            [[ -f "$cs_file" ]] || error_exit "Community string file not found: $cs_file"
+            mapfile -t community_strings <"$cs_file"
+            ;;
+        *)
+            community_strings=("${default_strings[@]}")
+            ;;
+    esac
+    community_file=$(mktemp)
+    printf "%s\n" "${community_strings[@]}" >"$community_file"
+    trap 'rm -f "$community_file"' EXIT
+}
+
+get_community_strings
+
 # Function to print a progress bar in light green color
 print_progress() {
-    local current=$1 # Arguments: current progress, total, current subnet/IP
+    local current=$1 # Arguments: current progress, total, current subnet/IP, entry type
     local total=$2
     local subnet_ip=$3
+    local entry_type=$4
     local progress=$((current * 100 / total))
     local completed=$((progress / 2))
     local remaining=$((50 - completed))
@@ -279,18 +309,15 @@ echo "SNMPAT started at $now by user $current_user." >"$log_file"
 # Scan each subnet/IP one by one
 for i in "${!subnets[@]}" "${!ip_addresses[@]}"; do
     if [[ $i -lt ${#subnets[@]} ]]; then
-        print_progress "$((i + 1))" "$total" "${subnets[$i]}" # Print progress bar for subnets
-    else
-        print_progress "$((i + 1))" "$total" "${ip_addresses[$i - ${#subnets[@]}]}" # Print progress bar for IP addresses
-    fi
-
-    if [[ $i -lt ${#subnets[@]} ]]; then
-        if ! onesixtyone -c <(echo -e "public\ncommunity\ndefault\nadmin\nprivate\npublic\nmanager\ncisco\nsnmp\nnetwork\nmonitor\nagent\ntrap\nread\nwrite") -i <(echo "${subnets[$i]}") >>"$log_file"; then
+        print_progress "$((i + 1))" "$total" "${subnets[$i]}" "Subnet"
+        if ! onesixtyone -c "$community_file" -i <(echo "${subnets[$i]}") >>"$log_file"; then
             echo "Error occurred while scanning subnet: ${subnets[$i]}"
         fi
     else
-        if ! onesixtyone -c <(echo -e "public\ncommunity\ndefault\nadmin\nprivate\npublic\nmanager\ncisco\nsnmp\nnetwork\nmonitor\nagent\ntrap\nread\nwrite") -i <(echo "${ip_addresses[$i - ${#subnets[@]}]}") >>"$log_file"; then
-            echo "Error occurred while scanning IP address: ${ip_addresses[$i - ${#subnets[@]}]}"
+        idx=$((i - ${#subnets[@]}))
+        print_progress "$((i + 1))" "$total" "${ip_addresses[$idx]}" "IP"
+        if ! onesixtyone -c "$community_file" -i <(echo "${ip_addresses[$idx]}") >>"$log_file"; then
+            echo "Error occurred while scanning IP address: ${ip_addresses[$idx]}"
         fi
     fi
 done
@@ -298,7 +325,7 @@ done
 # Perform DNS lookup on each host and prepend hostname to each line
 sed -i '/Error in sendto: Permission denied/d' $log_file # Remove the "Error in sendto: Permission denied" line from the log file
 sed -i '/Scanning/d' $log_file                           # Remove the "Scanning" line from the log file
-awk 'NR>3 {print $1}' $log_file | sort -u | tail -n +4 | uniq | while read -r ip; do
+tail -n +5 "$log_file" | awk '{print $1}' | sort -u | while read -r ip; do
     if ! hostname=$(dig +short -x "$ip"); then
         echo "dig lookup failed for IP: $ip" >&2
         continue
