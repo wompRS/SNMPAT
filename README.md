@@ -8,10 +8,15 @@ SNMPAT (SNMP Auditing Tool) is a project that provides a set of tools for SNMP (
 - It allows you to perform SNMP GET, GETNEXT, GETBULK, and SET operations.
 - SNMPAT provides a command-line interface for easy integration into scripts and automation workflows.
 - It supports both IPv4 and IPv6 addresses for SNMP communication.
+- The scanner lets you supply custom SNMP community strings or use a built-in default list.
 
 ## Usage
 
-> ./snmpat.sh
+Run the script and follow the prompts to enter target subnets/IPs and SNMP community strings:
+
+```bash
+./snmpat.sh
+```
 
 ## Dependencies
 SNMPAT has the following dependencies:
