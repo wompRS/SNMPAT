@@ -15,6 +15,27 @@ SNMPAT (SNMP Auditing Tool) is a project that provides a set of tools for SNMP (
 Run the script and follow the prompts to enter target subnets/IPs and SNMP community strings:
 
 ```bash
+./SNMPAT.sh
+```
+
+During execution you can build the SNMP community string list by combining any of the following sources:
+
+- Add the built-in defaults with one menu selection.
+- Enter additional strings directly (comma or space separated); duplicate and blank values are ignored automatically.
+- Load strings from a text or CSV file, where values can be separated by commas or whitespace across multiple lines.
+
+You can review the growing list after each addition and only proceed once you are satisfied, ensuring the scan always runs with a clean, deduplicated set of community strings.
+
+When you are ready to supply targets, enter subnets, IPs, or file paths in any order. Use the `done` keyword to review a summary of
+the current selections; the script highlights any IPs already covered by one of the subnets so you know exactly what will be scanned
+before the tool continues.
+
+### Testing
+
+The repository includes a lightweight smoke test that exercises the interactive prompts with mocked `onesixtyone` and `dig` binaries. Run it from the project root with:
+
+```bash
+tests/run_tests.sh
 ./snmpat.sh
 ```
 
