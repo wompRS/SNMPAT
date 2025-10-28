@@ -75,7 +75,7 @@ get_community_strings() {
             2)
                 read -rp $'\e[93;1mEnter community strings (comma or space separated): \e[0m' cs_input
                 cs_input=${cs_input//,/ }
-                manual_entries=()
+                local -a manual_entries=()
                 if [[ -n $cs_input ]]; then
                     read -ra manual_entries <<<"$cs_input"
                 fi
@@ -102,7 +102,7 @@ get_community_strings() {
                     line=$(trim_entry "$line")
                     line=${line//,/ }
                     [[ -z $line ]] && continue
-                    file_entries=()
+                    local -a file_entries=()
                     read -ra file_entries <<<"$line"
                     for entry in "${file_entries[@]}"; do
                         trimmed=$(trim_entry "$entry")
@@ -164,7 +164,7 @@ print_progress() {
 subnets=()
 ip_addresses=()
 
-validate_subnets_ip() {
+summarize_targets() {
     ip2int() {
         local a b c d
         IFS=. read -r a b c d <<<"$1"
@@ -198,17 +198,17 @@ validate_subnets_ip() {
         fi
     }
 
-    if ((${#subnets[@]})); then
-        mapfile -t subnets < <(printf '%s\n' "${subnets[@]}" | awk 'NF' | sort -u)
-    else
-        subnets=()
-    fi
+    dedupe_array() {
+        local -n input_ref=$1
+        if ((${#input_ref[@]})); then
+            mapfile -t input_ref < <(printf '%s\n' "${input_ref[@]}" | awk 'NF' | sort -u)
+        else
+            input_ref=()
+        fi
+    }
 
-    if ((${#ip_addresses[@]})); then
-        mapfile -t ip_addresses < <(printf '%s\n' "${ip_addresses[@]}" | awk 'NF' | sort -u)
-    else
-        ip_addresses=()
-    fi
+    dedupe_array subnets
+    dedupe_array ip_addresses
 
     echo -e "\e[94mSubnets:\e[0m"
     if ((${#subnets[@]} == 0)); then
@@ -240,6 +240,35 @@ validate_subnets_ip() {
     done
 
     ip_addresses=("${filtered_ips[@]}")
+}
+
+print_current_entries() {
+    echo "Current list of entries:"
+    if ((${#subnets[@]} == 0 && ${#ip_addresses[@]} == 0)); then
+        echo "  (none)"
+    else
+        for subnet in "${subnets[@]}"; do
+            [[ -n $subnet ]] && echo "  $subnet"
+        done
+        for ip in "${ip_addresses[@]}"; do
+            [[ -n $ip ]] && echo "  $ip"
+        done
+    fi
+}
+
+load_targets_from_file() {
+    local file_path=$1
+    local line
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=$(trim_entry "$line")
+        line=${line//,/ }
+        [[ -z $line ]] && continue
+        local -a entries=()
+        read -ra entries <<<"$line"
+        for entry in "${entries[@]}"; do
+            add_target_entry "$entry"
+        done
+    done <"$file_path"
 }
 
 contains_entry() {
@@ -277,11 +306,8 @@ get_community_strings
 while true; do
     read -p $'\e[93;1mEnter subnet/IP or file: \e[0m' input
     if [[ $input == "done" ]]; then
-        echo "Current list of entries:"
-        for subnet_ip in "${subnets[@]}" "${ip_addresses[@]}"; do
-            [[ -n $subnet_ip ]] && echo "$subnet_ip"
-        done
-        validate_subnets_ip
+        print_current_entries
+        summarize_targets
         if [[ ${#subnets[@]} -eq 0 && ${#ip_addresses[@]} -eq 0 ]]; then
             echo "Please re-enter the subnets/IPs."
             subnets=()
@@ -291,21 +317,9 @@ while true; do
         break
     elif [[ $input == *.txt || $input == *.csv ]]; then
         if [[ -f $input ]]; then
-            while IFS= read -r line; do
-                line=$(trim_entry "$line")
-                line=${line//,/ }
-                [[ -z $line ]] && continue
-                entries=()
-                read -ra entries <<<"$line"
-                for entry in "${entries[@]}"; do
-                    add_target_entry "$entry"
-                done
-            done <"$input"
-            echo "Current list of entries:"
-            for subnet_ip in "${subnets[@]}" "${ip_addresses[@]}"; do
-                [[ -n $subnet_ip ]] && echo "$subnet_ip"
-            done
-            validate_subnets_ip
+            load_targets_from_file "$input"
+            print_current_entries
+            summarize_targets
             if [[ ${#subnets[@]} -eq 0 && ${#ip_addresses[@]} -eq 0 ]]; then
                 echo "Please re-enter the subnets/IPs."
                 subnets=()
@@ -326,16 +340,7 @@ while true; do
             [[ -z $token ]] && continue
             if [[ $token == *.txt || $token == *.csv ]]; then
                 if [[ -f $token ]]; then
-                    while IFS= read -r line; do
-                        line=$(trim_entry "$line")
-                        line=${line//,/ }
-                        [[ -z $line ]] && continue
-                        file_entries=()
-                        read -ra file_entries <<<"$line"
-                        for entry in "${file_entries[@]}"; do
-                            add_target_entry "$entry"
-                        done
-                    done <"$token"
+                    load_targets_from_file "$token"
                 else
                     echo "File not found: $token"
                 fi
@@ -343,16 +348,13 @@ while true; do
                 add_target_entry "$token"
             fi
         done
-        echo "Current list of entries:"
-        for subnet_ip in "${subnets[@]}" "${ip_addresses[@]}"; do
-            [[ -n $subnet_ip ]] && echo "$subnet_ip"
-        done
+        print_current_entries
         echo "" # Newline for clean output
         read -p $'\e[93;1mDo you want to add any more subnets/IPs? (y/n): \e[0m' add_more
         case $add_more in
         [Yy]*) continue ;;
         [Nn]*)
-            validate_subnets_ip
+            summarize_targets
             if [[ ${#subnets[@]} -eq 0 && ${#ip_addresses[@]} -eq 0 ]]; then
                 echo "Please re-enter the subnets/IPs."
                 subnets=()
