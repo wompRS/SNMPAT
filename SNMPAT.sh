@@ -19,6 +19,33 @@ check_dependencies() {
 
 check_dependencies
 
+trim_entry() {
+    local entry=${1//$'\r'/}
+    entry="${entry#${entry%%[![:space:]]*}}"
+    entry="${entry%${entry##*[![:space:]]}}"
+    printf '%s' "$entry"
+}
+
+is_valid_ipv4() {
+    local candidate=$1
+    local IFS=.
+    read -r o1 o2 o3 o4 <<<"$candidate" || return 1
+    for octet in "$o1" "$o2" "$o3" "$o4"; do
+        [[ $octet =~ ^[0-9]+$ ]] || return 1
+        ((octet >= 0 && octet <= 255)) || return 1
+    done
+    return 0
+}
+
+is_valid_cidr() {
+    local candidate=$1
+    local network mask
+    IFS=/ read -r network mask <<<"$candidate" || return 1
+    [[ -n ${mask:-} && $mask =~ ^[0-9]+$ ]] || return 1
+    ((mask >= 0 && mask <= 32)) || return 1
+    is_valid_ipv4 "$network"
+}
+
 # Prompt user for SNMP community strings and store them in a temporary file
 get_community_strings() {
     local default_strings=("public" "community" "default" "admin" "private" "manager" "cisco" "snmp" "network" "monitor" "agent" "trap" "read" "write")
@@ -37,9 +64,7 @@ get_community_strings() {
         case "$choice" in
             1)
                 for entry in "${default_strings[@]}"; do
-                    trimmed=${entry//$'\r'/}
-                    trimmed="${trimmed#${trimmed%%[![:space:]]*}}"
-                    trimmed="${trimmed%${trimmed##*[![:space:]]}}"
+                    trimmed=$(trim_entry "$entry")
                     if [[ -n $trimmed && -z ${seen_strings[$trimmed]+x} ]]; then
                         collected_strings+=("$trimmed")
                         seen_strings[$trimmed]=1
@@ -50,14 +75,12 @@ get_community_strings() {
             2)
                 read -rp $'\e[93;1mEnter community strings (comma or space separated): \e[0m' cs_input
                 cs_input=${cs_input//,/ }
-                local -a manual_entries=()
+                manual_entries=()
                 if [[ -n $cs_input ]]; then
                     read -ra manual_entries <<<"$cs_input"
                 fi
                 for entry in "${manual_entries[@]}"; do
-                    trimmed=${entry//$'\r'/}
-                    trimmed="${trimmed#${trimmed%%[![:space:]]*}}"
-                    trimmed="${trimmed%${trimmed##*[![:space:]]}}"
+                    trimmed=$(trim_entry "$entry")
                     if [[ -n $trimmed && -z ${seen_strings[$trimmed]+x} ]]; then
                         collected_strings+=("$trimmed")
                         seen_strings[$trimmed]=1
@@ -76,15 +99,13 @@ get_community_strings() {
                     continue
                 fi
                 while IFS= read -r line || [[ -n $line ]]; do
-                    line=${line//$'\r'/}
+                    line=$(trim_entry "$line")
                     line=${line//,/ }
                     [[ -z $line ]] && continue
-                    local -a file_entries=()
+                    file_entries=()
                     read -ra file_entries <<<"$line"
                     for entry in "${file_entries[@]}"; do
-                        trimmed=${entry//$'\r'/}
-                        trimmed="${trimmed#${trimmed%%[![:space:]]*}}"
-                        trimmed="${trimmed%${trimmed##*[![:space:]]}}"
+                        trimmed=$(trim_entry "$entry")
                         if [[ -n $trimmed && -z ${seen_strings[$trimmed]+x} ]]; then
                             collected_strings+=("$trimmed")
                             seen_strings[$trimmed]=1
@@ -119,11 +140,8 @@ get_community_strings() {
     trap 'rm -f "$community_file"' EXIT
 }
 
-get_community_strings
-
-# Function to print a progress bar in light green color
 print_progress() {
-    local current=$1 # Arguments: current progress, total, current subnet/IP, entry type
+    local current=$1
     local total=$2
     local subnet_ip=$3
     local entry_type=$4
@@ -143,13 +161,10 @@ print_progress() {
     printf "\rProgress: ${light_green}[%s%s] %d%%${reset_color} (Scanning %s, %s %d of %d)" "$completed_bar" "$remaining_bar" "$progress" "$subnet_ip" "$entry_type" "$current" "$total"
 }
 
-# Define your subnets and IP addresses
 subnets=()
 ip_addresses=()
 
-# Function to validate subnets and IP addresses
 validate_subnets_ip() {
-    # Function to convert IP to integer
     ip2int() {
         local a b c d
         IFS=. read -r a b c d <<<"$1"
@@ -167,9 +182,20 @@ validate_subnets_ip() {
         if ((mask == 0)); then
             mask_int=0
         else
-            mask_int=$(( (0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF ))
+            mask_int=$(((0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF))
         fi
         [[ $((network_int & mask_int)) -eq $((ip_int & mask_int)) ]]
+    }
+
+    subnet_host_count() {
+        local cidr=$1
+        local _network mask
+        IFS=/ read -r _network mask <<<"$cidr"
+        if ((mask == 32)); then
+            echo 1
+        else
+            echo $((2 ** (32 - mask)))
+        fi
     }
 
     if ((${#subnets[@]})); then
@@ -185,23 +211,30 @@ validate_subnets_ip() {
     fi
 
     echo -e "\e[94mSubnets:\e[0m"
-    for subnet in "${subnets[@]}"; do
-        echo "$subnet"
-    done
+    if ((${#subnets[@]} == 0)); then
+        echo "  (none)"
+    else
+        for subnet in "${subnets[@]}"; do
+            printf '  %s (covers %s addresses)\n' "$subnet" "$(subnet_host_count "$subnet")"
+        done
+    fi
 
     echo -e "\e[94mIP Addresses:\e[0m"
     local -a filtered_ips=()
+    if ((${#ip_addresses[@]} == 0)); then
+        echo "  (none)"
+    fi
     for ip in "${ip_addresses[@]}"; do
         local is_duplicate=false
         for subnet in "${subnets[@]}"; do
             if cidr_contains_ip "$subnet" "$ip"; then
-                echo "$ip - Duplicate entry. Scanner will skip. Subnet: $subnet"
+                echo "  $ip - Duplicate entry. Scanner will skip. Subnet: $subnet"
                 is_duplicate=true
                 break
             fi
         done
         if [[ $is_duplicate == false ]]; then
-            echo "$ip"
+            echo "  $ip"
             filtered_ips+=("$ip")
         fi
     done
@@ -209,20 +242,47 @@ validate_subnets_ip() {
     ip_addresses=("${filtered_ips[@]}")
 }
 
-# Ask the user to enter subnets and IP addresses manually or in a file containing the subnets/IPs
-echo -e "\e[93mPlease enter the addresses you want to scan:\e[0m"
-echo "1. Subnet in CIDR format (e.g. 192.168.0.0/24, 10.0.0.0/8)"
-echo "2. Individual IP Addresses (e.g. 192.168.0.1, 10.0.0.1)"
-echo "3. .txt or .csv file (e.g. subnets.txt, subnets.csv)"
-echo -e "\e[94;1mEnter each value as a comma-separated list or as individual lines:\e[0m"
+contains_entry() {
+    local needle=$1
+    shift || return 1
+    local item
+    for item in "$@"; do
+        [[ $item == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+add_target_entry() {
+    local entry=$(trim_entry "$1")
+    [[ -z $entry ]] && return 0
+    if is_valid_cidr "$entry"; then
+        if contains_entry "$entry" "${subnets[@]}"; then
+            echo "Duplicate subnet entry: $entry"
+        else
+            subnets+=("$entry")
+        fi
+    elif is_valid_ipv4 "$entry"; then
+        if contains_entry "$entry" "${ip_addresses[@]}"; then
+            echo "Duplicate IP address entry: $entry"
+        else
+            ip_addresses+=("$entry")
+        fi
+    else
+        echo "Invalid subnet/IP format: $entry"
+    fi
+}
+
+get_community_strings
+
 while true; do
     read -p $'\e[93;1mEnter subnet/IP or file: \e[0m' input
     if [[ $input == "done" ]]; then
         echo "Current list of entries:"
         for subnet_ip in "${subnets[@]}" "${ip_addresses[@]}"; do
-            echo "$subnet_ip"
+            [[ -n $subnet_ip ]] && echo "$subnet_ip"
         done
-        if ! validate_subnets_ip; then
+        validate_subnets_ip
+        if [[ ${#subnets[@]} -eq 0 && ${#ip_addresses[@]} -eq 0 ]]; then
             echo "Please re-enter the subnets/IPs."
             subnets=()
             ip_addresses=()
@@ -232,27 +292,21 @@ while true; do
     elif [[ $input == *.txt || $input == *.csv ]]; then
         if [[ -f $input ]]; then
             while IFS= read -r line; do
-                if [[ $line =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then # Validate subnet format
-                    if [[ " ${subnets[@]} " =~ " $line " ]]; then
-                        echo "Duplicate subnet entry: $line"
-                    else
-                        subnets+=("$line")
-                    fi
-                elif [[ $line =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then # Validate IP address format
-                    if [[ " ${ip_addresses[@]} " =~ " $line " ]]; then
-                        echo "Duplicate IP address entry: $line"
-                    else
-                        ip_addresses+=("$line")
-                    fi
-                else
-                    echo "Invalid subnet/IP format in file: $line"
-                fi
+                line=$(trim_entry "$line")
+                line=${line//,/ }
+                [[ -z $line ]] && continue
+                entries=()
+                read -ra entries <<<"$line"
+                for entry in "${entries[@]}"; do
+                    add_target_entry "$entry"
+                done
             done <"$input"
             echo "Current list of entries:"
             for subnet_ip in "${subnets[@]}" "${ip_addresses[@]}"; do
-                echo "$subnet_ip"
+                [[ -n $subnet_ip ]] && echo "$subnet_ip"
             done
-            if ! validate_subnets_ip; then
+            validate_subnets_ip
+            if [[ ${#subnets[@]} -eq 0 && ${#ip_addresses[@]} -eq 0 ]]; then
                 echo "Please re-enter the subnets/IPs."
                 subnets=()
                 ip_addresses=()
@@ -263,76 +317,43 @@ while true; do
             echo "File not found. Please try again."
         fi
     else
-        IFS=',' read -ra subnet_ip_list <<<"$input" # Validate subnet/IP format
-        for subnet_ip in "${subnet_ip_list[@]}"; do
-            if [[ $subnet_ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-                if [[ " ${subnets[@]} " =~ " $subnet_ip " ]]; then
-                    echo "Duplicate subnet entry: $subnet_ip"
+        input=$(trim_entry "$input")
+        input=${input//,/ }
+        tokens=()
+        read -ra tokens <<<"$input"
+        for token in "${tokens[@]}"; do
+            token=$(trim_entry "$token")
+            [[ -z $token ]] && continue
+            if [[ $token == *.txt || $token == *.csv ]]; then
+                if [[ -f $token ]]; then
+                    while IFS= read -r line; do
+                        line=$(trim_entry "$line")
+                        line=${line//,/ }
+                        [[ -z $line ]] && continue
+                        file_entries=()
+                        read -ra file_entries <<<"$line"
+                        for entry in "${file_entries[@]}"; do
+                            add_target_entry "$entry"
+                        done
+                    done <"$token"
                 else
-                    subnets+=("$subnet_ip")
-                fi
-            elif [[ $subnet_ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-                if [[ " ${ip_addresses[@]} " =~ " $subnet_ip " ]]; then
-                    echo "Duplicate IP address entry: $subnet_ip"
-                else
-                    ip_addresses+=("$subnet_ip")
+                    echo "File not found: $token"
                 fi
             else
-                # Check if the input contains a file and individual subnet/IP entry on the same line
-                IFS=' ' read -ra entries <<<"$subnet_ip"
-                for entry in "${entries[@]}"; do
-                    if [[ $entry == *.txt || $entry == *.csv ]]; then
-                        if [[ -f $entry ]]; then
-                            while IFS= read -r line; do
-                                if [[ $line =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then # Validate subnet format
-                                    if [[ " ${subnets[@]} " =~ " $line " ]]; then
-                                        echo "Duplicate subnet entry: $line"
-                                    else
-                                        subnets+=("$line")
-                                    fi
-                                elif [[ $line =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then # Validate IP address format
-                                    if [[ " ${ip_addresses[@]} " =~ " $line " ]]; then
-                                        echo "Duplicate IP address entry: $line"
-                                    else
-                                        ip_addresses+=("$line")
-                                    fi
-                                else
-                                    echo "Invalid subnet/IP format in file: $line"
-                                fi
-                            done <"$entry"
-                        else
-                            echo "File not found: $entry"
-                        fi
-                    else
-                        if [[ $entry =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-                            if [[ " ${subnets[@]} " =~ " $entry " ]]; then
-                                echo "Duplicate subnet entry: $entry"
-                            else
-                                subnets+=("$entry")
-                            fi
-                        elif [[ $entry =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-                            if [[ " ${ip_addresses[@]} " =~ " $entry " ]]; then
-                                echo "Duplicate IP address entry: $entry"
-                            else
-                                ip_addresses+=("$entry")
-                            fi
-                        else
-                            echo "Invalid subnet/IP format: $entry"
-                        fi
-                    fi
-                done
+                add_target_entry "$token"
             fi
         done
         echo "Current list of entries:"
         for subnet_ip in "${subnets[@]}" "${ip_addresses[@]}"; do
-            echo "$subnet_ip"
+            [[ -n $subnet_ip ]] && echo "$subnet_ip"
         done
         echo "" # Newline for clean output
         read -p $'\e[93;1mDo you want to add any more subnets/IPs? (y/n): \e[0m' add_more
         case $add_more in
         [Yy]*) continue ;;
         [Nn]*)
-            if ! validate_subnets_ip; then
+            validate_subnets_ip
+            if [[ ${#subnets[@]} -eq 0 && ${#ip_addresses[@]} -eq 0 ]]; then
                 echo "Please re-enter the subnets/IPs."
                 subnets=()
                 ip_addresses=()
