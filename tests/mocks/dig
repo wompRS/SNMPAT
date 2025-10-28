@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -eq 3 && $1 == '+short' && $2 == '-x' ]]; then
+    ip=$3
+    echo "mock-host-${ip//./-}"
+    exit 0
+fi
+
+echo "dig stub: unsupported invocation $*" >&2
+exit 1

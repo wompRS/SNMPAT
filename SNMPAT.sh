@@ -19,17 +19,128 @@ check_dependencies() {
 
 check_dependencies
 
+# Prompt user for SNMP community strings and store them in a temporary file
+get_community_strings() {
+    local default_strings=("public" "community" "default" "admin" "private" "manager" "cisco" "snmp" "network" "monitor" "agent" "trap" "read" "write")
+    local -a collected_strings=()
+    declare -A seen_strings=()
+    local choice cs_input cs_file line entry trimmed
+
+    while true; do
+        echo -e "\e[93mSelect how to build the community string list:\e[0m"
+        echo "1. Add default list"
+        echo "2. Add strings manually"
+        echo "3. Add strings from a file"
+        echo "4. Finish"
+        read -rp $'\e[93;1mChoice [1-4]: \e[0m' choice
+
+        case "$choice" in
+            1)
+                for entry in "${default_strings[@]}"; do
+                    trimmed=${entry//$'\r'/}
+                    trimmed="${trimmed#${trimmed%%[![:space:]]*}}"
+                    trimmed="${trimmed%${trimmed##*[![:space:]]}}"
+                    if [[ -n $trimmed && -z ${seen_strings[$trimmed]+x} ]]; then
+                        collected_strings+=("$trimmed")
+                        seen_strings[$trimmed]=1
+                    fi
+                done
+                echo -e "\e[92mAdded default community strings.\e[0m"
+                ;;
+            2)
+                read -rp $'\e[93;1mEnter community strings (comma or space separated): \e[0m' cs_input
+                cs_input=${cs_input//,/ }
+                local -a manual_entries=()
+                if [[ -n $cs_input ]]; then
+                    read -ra manual_entries <<<"$cs_input"
+                fi
+                for entry in "${manual_entries[@]}"; do
+                    trimmed=${entry//$'\r'/}
+                    trimmed="${trimmed#${trimmed%%[![:space:]]*}}"
+                    trimmed="${trimmed%${trimmed##*[![:space:]]}}"
+                    if [[ -n $trimmed && -z ${seen_strings[$trimmed]+x} ]]; then
+                        collected_strings+=("$trimmed")
+                        seen_strings[$trimmed]=1
+                    fi
+                done
+                if [[ ${#manual_entries[@]} -gt 0 ]]; then
+                    echo -e "\e[92mAdded manual entries.\e[0m"
+                else
+                    echo -e "\e[93mNo manual entries detected.\e[0m"
+                fi
+                ;;
+            3)
+                read -rp $'\e[93;1mEnter file path: \e[0m' cs_file
+                if [[ ! -f "$cs_file" ]]; then
+                    echo -e "\e[91mCommunity string file not found: $cs_file\e[0m"
+                    continue
+                fi
+                while IFS= read -r line || [[ -n $line ]]; do
+                    line=${line//$'\r'/}
+                    line=${line//,/ }
+                    [[ -z $line ]] && continue
+                    local -a file_entries=()
+                    read -ra file_entries <<<"$line"
+                    for entry in "${file_entries[@]}"; do
+                        trimmed=${entry//$'\r'/}
+                        trimmed="${trimmed#${trimmed%%[![:space:]]*}}"
+                        trimmed="${trimmed%${trimmed##*[![:space:]]}}"
+                        if [[ -n $trimmed && -z ${seen_strings[$trimmed]+x} ]]; then
+                            collected_strings+=("$trimmed")
+                            seen_strings[$trimmed]=1
+                        fi
+                    done
+                done <"$cs_file"
+                echo -e "\e[92mLoaded community strings from file.\e[0m"
+                ;;
+            4)
+                if [[ ${#collected_strings[@]} -eq 0 ]]; then
+                    echo -e "\e[91mPlease add at least one community string before finishing.\e[0m"
+                    continue
+                fi
+                break
+                ;;
+            *)
+                echo -e "\e[91mInvalid choice. Please select option 1-4.\e[0m"
+                ;;
+        esac
+
+        if [[ ${#collected_strings[@]} -gt 0 ]]; then
+            echo -e "\e[94mCurrent community strings (${#collected_strings[@]}):\e[0m"
+            for entry in "${collected_strings[@]}"; do
+                echo "  - $entry"
+            done
+        fi
+    done
+
+    community_file=$(mktemp)
+    printf "%s\n" "${collected_strings[@]}" >"$community_file"
+    echo -e "\e[94mUsing ${#collected_strings[@]} community strings for all scans.\e[0m"
+    trap 'rm -f "$community_file"' EXIT
+}
+
+get_community_strings
+
 # Function to print a progress bar in light green color
 print_progress() {
-    local current=$1 # Arguments: current progress, total, current subnet/IP
+    local current=$1 # Arguments: current progress, total, current subnet/IP, entry type
     local total=$2
     local subnet_ip=$3
+    local entry_type=$4
     local progress=$((current * 100 / total))
     local completed=$((progress / 2))
     local remaining=$((50 - completed))
     local light_green="\e[92m"
     local reset_color="\e[0m"
-    printf "\rProgress: ${light_green}[%s%s] %d%%${reset_color} (Scanning %s, %s %d of %d)" "$(printf "%0.s#" $(seq 1 $completed))" "$(printf "%0.s-" $(seq 1 $remaining))" "$progress" "$subnet_ip" "$entry_type" "$current" "$total"
+    local completed_bar=""
+    local remaining_bar=""
+    if ((completed > 0)); then
+        completed_bar=$(printf "%0.s#" $(seq 1 $completed))
+    fi
+    if ((remaining > 0)); then
+        remaining_bar=$(printf "%0.s-" $(seq 1 $remaining))
+    fi
+    printf "\rProgress: ${light_green}[%s%s] %d%%${reset_color} (Scanning %s, %s %d of %d)" "$completed_bar" "$remaining_bar" "$progress" "$subnet_ip" "$entry_type" "$current" "$total"
 }
 
 # Define your subnets and IP addresses
@@ -45,58 +156,57 @@ validate_subnets_ip() {
         echo $(((a << 24) + (b << 16) + (c << 8) + d))
     }
 
-    # Function to convert integer to IP
-    int2ip() {
-        local ui32=$1
-        shift
-        local ip n
-        for n in 1 2 3 4; do
-            ip=$((ui32 & 0xff))${ip:+.}$ip
-            ui32=$((ui32 >> 8))
-        done
-        echo "$ip"
+    cidr_contains_ip() {
+        local cidr=$1
+        local ip=$2
+        local network mask
+        IFS=/ read -r network mask <<<"$cidr"
+        local network_int=$(ip2int "$network")
+        local ip_int=$(ip2int "$ip")
+        local mask_int
+        if ((mask == 0)); then
+            mask_int=0
+        else
+            mask_int=$(( (0xFFFFFFFF << (32 - mask)) & 0xFFFFFFFF ))
+        fi
+        [[ $((network_int & mask_int)) -eq $((ip_int & mask_int)) ]]
     }
 
-    # Function to expand subnet to IPs
-    expand_subnet() {
-        local ip mask
-        IFS=/ read -r ip mask <<<"$1"
-        local ip_dec=$(ip2int "$ip")
-        local range_size=$((2 ** (32 - mask)))
-        local i
-        for ((i = 0; i < range_size; i++)); do
-            echo "$(int2ip $((ip_dec + i)))"
-        done
-    }
+    if ((${#subnets[@]})); then
+        mapfile -t subnets < <(printf '%s\n' "${subnets[@]}" | awk 'NF' | sort -u)
+    else
+        subnets=()
+    fi
 
-    # Sort the subnets array from low to high
-    sorted_subnets=($(printf '%s\n' "${subnets[@]}" | sort))
+    if ((${#ip_addresses[@]})); then
+        mapfile -t ip_addresses < <(printf '%s\n' "${ip_addresses[@]}" | awk 'NF' | sort -u)
+    else
+        ip_addresses=()
+    fi
 
-    # Sort the IPs array from low to high
-    sorted_ips=($(printf '%s\n' "${ip_addresses[@]}" | sort))
-
-    # Echo the sorted subnets that will be scanned
     echo -e "\e[94mSubnets:\e[0m"
-    for subnet in "${sorted_subnets[@]}"; do
+    for subnet in "${subnets[@]}"; do
         echo "$subnet"
     done
 
-   # Echo the sorted IPs that will be scanned
     echo -e "\e[94mIP Addresses:\e[0m"
-    for ip in "${sorted_ips[@]}"; do
-        # Check if the IP is in any of the subnets
+    local -a filtered_ips=()
+    for ip in "${ip_addresses[@]}"; do
         local is_duplicate=false
-        for subnet in "${sorted_subnets[@]}"; do
-            if [[ $(expand_subnet "$subnet") =~ (^|[[:space:]])"$ip"($|[[:space:]]) ]]; then
+        for subnet in "${subnets[@]}"; do
+            if cidr_contains_ip "$subnet" "$ip"; then
                 echo "$ip - Duplicate entry. Scanner will skip. Subnet: $subnet"
                 is_duplicate=true
                 break
             fi
         done
-        if [ "$is_duplicate" = false ] ; then
+        if [[ $is_duplicate == false ]]; then
             echo "$ip"
+            filtered_ips+=("$ip")
         fi
     done
+
+    ip_addresses=("${filtered_ips[@]}")
 }
 
 # Ask the user to enter subnets and IP addresses manually or in a file containing the subnets/IPs
@@ -235,11 +345,6 @@ while true; do
     fi
 done
 
-# Sort the subnets and IP addresses
-IFS=$'\n' subnets=($(sort <<<"${subnets[*]}"))
-IFS=$'\n' ip_addresses=($(sort <<<"${ip_addresses[*]}"))
-unset IFS
-
 # Total number of subnets and IP addresses
 total_subnets=${#subnets[@]}
 total_ip_addresses=${#ip_addresses[@]}
@@ -277,28 +382,28 @@ fi
 echo "SNMPAT started at $now by user $current_user." >"$log_file"
 
 # Scan each subnet/IP one by one
-for i in "${!subnets[@]}" "${!ip_addresses[@]}"; do
-    if [[ $i -lt ${#subnets[@]} ]]; then
-        print_progress "$((i + 1))" "$total" "${subnets[$i]}" # Print progress bar for subnets
-    else
-        print_progress "$((i + 1))" "$total" "${ip_addresses[$i - ${#subnets[@]}]}" # Print progress bar for IP addresses
-    fi
-
-    if [[ $i -lt ${#subnets[@]} ]]; then
-        if ! onesixtyone -c <(echo -e "public\ncommunity\ndefault\nadmin\nprivate\npublic\nmanager\ncisco\nsnmp\nnetwork\nmonitor\nagent\ntrap\nread\nwrite") -i <(echo "${subnets[$i]}") >>"$log_file"; then
-            echo "Error occurred while scanning subnet: ${subnets[$i]}"
-        fi
-    else
-        if ! onesixtyone -c <(echo -e "public\ncommunity\ndefault\nadmin\nprivate\npublic\nmanager\ncisco\nsnmp\nnetwork\nmonitor\nagent\ntrap\nread\nwrite") -i <(echo "${ip_addresses[$i - ${#subnets[@]}]}") >>"$log_file"; then
-            echo "Error occurred while scanning IP address: ${ip_addresses[$i - ${#subnets[@]}]}"
-        fi
+current_index=0
+for subnet in "${subnets[@]}"; do
+    ((++current_index))
+    print_progress "$current_index" "$total" "$subnet" "Subnet"
+    if ! onesixtyone -c "$community_file" -i <(echo "$subnet") >>"$log_file"; then
+        echo "Error occurred while scanning subnet: $subnet"
     fi
 done
+
+for ip in "${ip_addresses[@]}"; do
+    ((++current_index))
+    print_progress "$current_index" "$total" "$ip" "IP"
+    if ! onesixtyone -c "$community_file" -i <(echo "$ip") >>"$log_file"; then
+        echo "Error occurred while scanning IP address: $ip"
+    fi
+done
+echo ""
 
 # Perform DNS lookup on each host and prepend hostname to each line
 sed -i '/Error in sendto: Permission denied/d' $log_file # Remove the "Error in sendto: Permission denied" line from the log file
 sed -i '/Scanning/d' $log_file                           # Remove the "Scanning" line from the log file
-awk 'NR>3 {print $1}' $log_file | sort -u | tail -n +4 | uniq | while read -r ip; do
+tail -n +5 "$log_file" | awk '{print $1}' | sort -u | while read -r ip; do
     if ! hostname=$(dig +short -x "$ip"); then
         echo "dig lookup failed for IP: $ip" >&2
         continue
