@@ -142,6 +142,38 @@ get_community_strings() {
 
 print_progress() {
     local current=$1
+# Prompt user for SNMP community strings and store them in a temporary file
+get_community_strings() {
+    local default_strings=("public" "community" "default" "admin" "private" "manager" "cisco" "snmp" "network" "monitor" "agent" "trap" "read" "write")
+    echo -e "\e[93mSelect SNMP community string input:\e[0m"
+    echo "1. Use default list"
+    echo "2. Enter strings manually (comma-separated)"
+    echo "3. Provide path to a file"
+    read -rp $'\e[93;1mChoice [1-3]: \e[0m' choice
+    case "$choice" in
+        2)
+            read -rp $'\e[93;1mEnter community strings: \e[0m' cs_input
+            IFS=',' read -ra community_strings <<<"$cs_input"
+            ;;
+        3)
+            read -rp $'\e[93;1mEnter file path: \e[0m' cs_file
+            [[ -f "$cs_file" ]] || error_exit "Community string file not found: $cs_file"
+            mapfile -t community_strings <"$cs_file"
+            ;;
+        *)
+            community_strings=("${default_strings[@]}")
+            ;;
+    esac
+    community_file=$(mktemp)
+    printf "%s\n" "${community_strings[@]}" >"$community_file"
+    trap 'rm -f "$community_file"' EXIT
+}
+
+get_community_strings
+
+# Function to print a progress bar in light green color
+print_progress() {
+    local current=$1 # Arguments: current progress, total, current subnet/IP, entry type
     local total=$2
     local subnet_ip=$3
     local entry_type=$4
@@ -419,6 +451,18 @@ for ip in "${ip_addresses[@]}"; do
     print_progress "$current_index" "$total" "$ip" "IP"
     if ! onesixtyone -c "$community_file" -i <(echo "$ip") >>"$log_file"; then
         echo "Error occurred while scanning IP address: $ip"
+for i in "${!subnets[@]}" "${!ip_addresses[@]}"; do
+    if [[ $i -lt ${#subnets[@]} ]]; then
+        print_progress "$((i + 1))" "$total" "${subnets[$i]}" "Subnet"
+        if ! onesixtyone -c "$community_file" -i <(echo "${subnets[$i]}") >>"$log_file"; then
+            echo "Error occurred while scanning subnet: ${subnets[$i]}"
+        fi
+    else
+        idx=$((i - ${#subnets[@]}))
+        print_progress "$((i + 1))" "$total" "${ip_addresses[$idx]}" "IP"
+        if ! onesixtyone -c "$community_file" -i <(echo "${ip_addresses[$idx]}") >>"$log_file"; then
+            echo "Error occurred while scanning IP address: ${ip_addresses[$idx]}"
+        fi
     fi
 done
 echo ""

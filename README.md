@@ -36,6 +36,7 @@ The repository includes a lightweight smoke test that exercises the interactive 
 
 ```bash
 tests/run_tests.sh
+./snmpat.sh
 ```
 
 ## Dependencies
